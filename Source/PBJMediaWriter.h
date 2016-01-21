@@ -42,13 +42,14 @@
 @property (nonatomic, readonly, getter=isVideoReady) BOOL videoReady;
 
 - (BOOL)setupAudioWithSettings:(NSDictionary *)audioSettings;
-
-- (BOOL)setupVideoWithSettings:(NSDictionary *)videoSettings withAdditional:(NSDictionary *)additional;
+- (BOOL)setupVideoWithSettings:(NSDictionary *)videoSettings;
 
 // write methods, time durations
 
 @property (nonatomic, readonly) CMTime audioTimestamp;
 @property (nonatomic, readonly) CMTime videoTimestamp;
+
+@property (nonatomic, readonly) CMTime videoDuration;
 
 - (void)writeSampleBuffer:(CMSampleBufferRef)sampleBuffer withMediaTypeVideo:(BOOL)video;
 - (void)finishWritingWithCompletionHandler:(void (^)(void))handler;

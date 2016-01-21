@@ -31,7 +31,6 @@
 #import <CoreImage/CoreImage.h>
 #import <ImageIO/ImageIO.h>
 #import <OpenGLES/EAGL.h>
-#import <UIKit/UIKit.h>
 
 #define LOG_VISION 1
 #ifndef DLog
@@ -57,10 +56,6 @@ static NSString * const PBJVisionTorchModeObserverContext = @"PBJVisionTorchMode
 static NSString * const PBJVisionFlashAvailabilityObserverContext = @"PBJVisionFlashAvailabilityObserverContext";
 static NSString * const PBJVisionTorchAvailabilityObserverContext = @"PBJVisionTorchAvailabilityObserverContext";
 static NSString * const PBJVisionCaptureStillImageIsCapturingStillImageObserverContext = @"PBJVisionCaptureStillImageIsCapturingStillImageObserverContext";
-
-// additional video capture keys
-
-NSString * const PBJVisionVideoRotation = @"PBJVisionVideoRotation";
 
 // photo dictionary key definitions
 
@@ -110,6 +105,8 @@ typedef NS_ENUM(GLint, PBJVisionUniformLocationTypes)
     // vision core
 
     PBJMediaWriter *_mediaWriter;
+    
+    NSMutableArray<PBJMediaWriter*> *_mediaWriters;
 
     dispatch_queue_t _captureSessionDispatchQueue;
     dispatch_queue_t _captureCaptureDispatchQueue;
@@ -138,8 +135,7 @@ typedef NS_ENUM(GLint, PBJVisionUniformLocationTypes)
     NSInteger _audioBitRate;
     NSInteger _videoFrameRate;
     NSDictionary *_additionalCompressionProperties;
-    NSDictionary *_additionalVideoProperties;
-
+    
     AVCaptureDevice *_currentDevice;
     AVCaptureDeviceInput *_currentInput;
     AVCaptureOutput *_currentOutput;
@@ -213,7 +209,6 @@ typedef NS_ENUM(GLint, PBJVisionUniformLocationTypes)
 @synthesize audioBitRate = _audioBitRate;
 @synthesize videoBitRate = _videoBitRate;
 @synthesize additionalCompressionProperties = _additionalCompressionProperties;
-@synthesize additionalVideoProperties = _additionalVideoProperties;
 @synthesize maximumCaptureDuration = _maximumCaptureDuration;
 
 #pragma mark - singleton
@@ -229,11 +224,6 @@ typedef NS_ENUM(GLint, PBJVisionUniformLocationTypes)
 }
 
 #pragma mark - getters/setters
-
-- (BOOL)isVideoWritten
-{
-    return _flags.videoWritten;
-}
 
 - (BOOL)isCaptureSessionActive
 {
@@ -301,8 +291,17 @@ typedef NS_ENUM(GLint, PBJVisionUniformLocationTypes)
 
 - (Float64)capturedVideoSeconds
 {
-    if (_mediaWriter && CMTIME_IS_VALID(_mediaWriter.videoTimestamp)) {
-        return CMTimeGetSeconds(CMTimeSubtract(_mediaWriter.videoTimestamp, _startTimestamp));
+    if (_mediaWriter) {
+        CMTime allTime = kCMTimeZero;
+        for (PBJMediaWriter * writer in _mediaWriters) {
+            allTime = CMTimeAdd(allTime, writer.videoDuration);
+        }
+        
+        if (CMTIME_IS_INVALID(allTime)) {
+            return 0.0;
+        }
+        
+        return CMTimeGetSeconds(allTime);
     } else {
         return 0.0;
     }
@@ -1125,7 +1124,7 @@ typedef void (^PBJVisionBlock)();
     } else if ( newCaptureOutput && (newCaptureOutput == _captureOutputPhoto) ) {
     
         // specify photo preset
-        sessionPreset = _captureSessionPreset;
+        sessionPreset = AVCaptureSessionPresetPhoto;
     
         // setup photo settings
         NSDictionary *photoSettings = @{AVVideoCodecKey : AVVideoCodecJPEG};
@@ -1538,37 +1537,6 @@ typedef void (^PBJVisionBlock)();
     return thumbnail;
 }
 
-// http://www.samwirch.com/blog/cropping-and-resizing-images-camera-ios-and-objective-c
-- (UIImage *)_squareImageWithImage:(UIImage *)image scaledToSize:(CGSize)newSize {
-    CGFloat ratio = 0.0;
-    CGFloat delta = 0.0;
-    CGPoint offset = CGPointZero;
-  
-    if (image.size.width > image.size.height) {
-        ratio = newSize.width / image.size.width;
-        delta = (ratio * image.size.width - ratio * image.size.height);
-        offset = CGPointMake(delta * 0.5f, 0);
-    } else {
-        ratio = newSize.width / image.size.height;
-        delta = (ratio * image.size.height - ratio * image.size.width);
-        offset = CGPointMake(0, delta * 0.5f);
-    }
- 
-    CGRect clipRect = CGRectMake(-offset.x, -offset.y,
-                                 (ratio * image.size.width) + delta,
-                                 (ratio * image.size.height) + delta);
-  
-    CGSize squareSize = CGSizeMake(newSize.width, newSize.width);
-    
-    UIGraphicsBeginImageContextWithOptions(squareSize, YES, 0.0);
-    UIRectClip(clipRect);
-    [image drawInRect:clipRect];
-    UIImage *newImage = UIGraphicsGetImageFromCurrentImageContext();
-    UIGraphicsEndImageContext();
- 
-    return newImage;
-}
-
 // http://sylvana.net/jpegcrop/exif_orientation.html
 - (UIImageOrientation)_imageOrientationFromExifOrientation:(NSInteger)exifOrientation
 {
@@ -1667,12 +1635,6 @@ typedef void (^PBJVisionBlock)();
     }
     
     if (uiImage) {
-        if (_outputFormat == PBJOutputFormatSquare) {
-            uiImage = [self _squareImageWithImage:uiImage scaledToSize:uiImage.size];
-        }
-        // PBJOutputFormatWidescreen
-        // PBJOutputFormatStandard
-    
         photoDict[PBJVisionPhotoImageKey] = uiImage;
         
         // add JPEG, thumbnail
@@ -1704,7 +1666,6 @@ typedef void (^PBJVisionBlock)();
 - (void)capturePhoto
 {
     if (![self _canSessionCaptureWithOutput:_currentOutput] || _cameraMode != PBJCameraModePhoto) {
-        [self _failPhotoCaptureWithErrorCode:PBJVisionErrorSessionFailed];
         DLog(@"session is not setup properly for capture");
         return;
     }
@@ -1713,16 +1674,15 @@ typedef void (^PBJVisionBlock)();
     [self _setOrientationForConnection:connection];
     
     [_captureOutputPhoto captureStillImageAsynchronouslyFromConnection:connection completionHandler:^(CMSampleBufferRef imageDataSampleBuffer, NSError *error) {
+        if (!imageDataSampleBuffer) {
+            DLog(@"failed to obtain image data sample buffer");
+            return;
+        }
+    
         if (error) {
             if ([_delegate respondsToSelector:@selector(vision:capturedPhoto:error:)]) {
                 [_delegate vision:self capturedPhoto:nil error:error];
             }
-            return;
-        }
-
-        if (!imageDataSampleBuffer) {
-            [self _failPhotoCaptureWithErrorCode:PBJVisionErrorCaptureFailed];
-            DLog(@"failed to obtain image data sample buffer");
             return;
         }
         
@@ -1790,9 +1750,56 @@ typedef void (^PBJVisionBlock)();
     return [self supportsVideoCapture] && [self isCaptureSessionActive] && !_flags.changingModes && isDiskSpaceAvailable;
 }
 
+- (PBJMediaWriter*)createNewMediaWriter
+{
+    NSString *guid = [[NSUUID new] UUIDString];
+    NSString *outputFile = [NSString stringWithFormat:@"video_%@_%f.mp4", guid, [[NSDate date] timeIntervalSince1970]];
+    
+    if ([_delegate respondsToSelector:@selector(vision:willStartVideoCaptureToFile:)]) {
+        outputFile = [_delegate vision:self willStartVideoCaptureToFile:outputFile];
+        
+        if (!outputFile) {
+            [self _failVideoCaptureWithErrorCode:PBJVisionErrorBadOutputFile];
+            return nil;
+        }
+    }
+    
+    NSString *outputDirectory = (_captureDirectory == nil ? NSTemporaryDirectory() : _captureDirectory);
+    NSString *outputPath = [outputDirectory stringByAppendingPathComponent:outputFile];
+    NSURL *outputURL = [NSURL fileURLWithPath:outputPath];
+    if ([[NSFileManager defaultManager] fileExistsAtPath:outputPath]) {
+        NSError *error = nil;
+        if (![[NSFileManager defaultManager] removeItemAtPath:outputPath error:&error]) {
+            [self _failVideoCaptureWithErrorCode:PBJVisionErrorOutputFileExists];
+            
+            DLog(@"could not setup an output file (file exists)");
+            return nil;
+        }
+    }
+    
+    if (!outputPath || [outputPath length] == 0) {
+        [self _failVideoCaptureWithErrorCode:PBJVisionErrorBadOutputFile];
+        
+        DLog(@"could not setup an output file");
+        return nil;
+    }
+    
+    _mediaWriter.delegate = nil;
+    [_mediaWriter finishWritingWithCompletionHandler:^{
+        
+    }];
+    
+    _mediaWriter = [[PBJMediaWriter alloc] initWithOutputURL:outputURL];
+    _mediaWriter.delegate = self;
+    
+    [_mediaWriters addObject:_mediaWriter];
+    
+    return _mediaWriter;
+}
+
 - (void)startVideoCapture
 {
-    if (![self _canSessionCaptureWithOutput:_currentOutput] || _cameraMode != PBJCameraModeVideo) {
+    if (![self _canSessionCaptureWithOutput:_currentOutput]) {
         [self _failVideoCaptureWithErrorCode:PBJVisionErrorSessionFailed];
         DLog(@"session is not setup properly for capture");
         return;
@@ -1840,9 +1847,12 @@ typedef void (^PBJVisionBlock)();
         if (_mediaWriter) {
             _mediaWriter.delegate = nil;
             _mediaWriter = nil;
+            _mediaWriters = nil;
         }
         _mediaWriter = [[PBJMediaWriter alloc] initWithOutputURL:outputURL];
         _mediaWriter.delegate = self;
+        
+        _mediaWriters = @[_mediaWriter].mutableCopy;
 
         AVCaptureConnection *videoConnection = [_captureOutputVideo connectionWithMediaType:AVMediaTypeVideo];
         [self _setOrientationForConnection:videoConnection];
@@ -1879,7 +1889,7 @@ typedef void (^PBJVisionBlock)();
             DLog(@"media writer unavailable to stop");
             return;
         }
-
+        
         DLog(@"pausing video capture");
 
         _flags.paused = YES;
@@ -1903,6 +1913,8 @@ typedef void (^PBJVisionBlock)();
             return;
         }
  
+         [self createNewMediaWriter];
+        
         DLog(@"resuming video capture");
        
         _flags.paused = NO;
@@ -1914,14 +1926,118 @@ typedef void (^PBJVisionBlock)();
     }];    
 }
 
+- (void)generateFullVideoWithCompletionHandler:(void(^)(NSString*))completionHandler
+{
+    AVMutableComposition *composition = [AVMutableComposition composition];
+    AVMutableCompositionTrack *compositionVideoTrack = [composition addMutableTrackWithMediaType:AVMediaTypeVideo preferredTrackID:kCMPersistentTrackID_Invalid];
+    AVMutableVideoComposition *videoComposition = [AVMutableVideoComposition videoComposition];
+    
+    videoComposition.frameDuration = CMTimeMake(1,30);
+    videoComposition.renderScale = 1.0;
+    
+    AVMutableVideoCompositionInstruction *instruction = [AVMutableVideoCompositionInstruction videoCompositionInstruction];
+    AVMutableVideoCompositionLayerInstruction *layerInstruction = [AVMutableVideoCompositionLayerInstruction videoCompositionLayerInstructionWithAssetTrack:compositionVideoTrack];
+    
+    // Get only paths the user selected
+    NSMutableArray *array = [NSMutableArray array];
+    for (PBJMediaWriter * writer in _mediaWriters){
+        [array addObject:writer.outputURL];
+    }
+    
+    float time = 0;
+    
+    for (int i = 0; i < _mediaWriters.count; i++) {
+        AVURLAsset *sourceAsset = [AVURLAsset URLAssetWithURL:[array objectAtIndex:i] options:[NSDictionary dictionaryWithObject:[NSNumber numberWithBool:YES] forKey:AVURLAssetPreferPreciseDurationAndTimingKey]];
+        
+        NSError *error = nil;
+        
+        BOOL ok = NO;
+        AVAssetTrack *sourceVideoTrack = [[sourceAsset tracksWithMediaType:AVMediaTypeVideo] objectAtIndex:0];
+        
+        CGSize temp = CGSizeApplyAffineTransform(sourceVideoTrack.naturalSize, sourceVideoTrack.preferredTransform);
+        CGSize size = CGSizeMake(fabsf(temp.width), fabsf(temp.height));
+        CGAffineTransform transform = sourceVideoTrack.preferredTransform;
+        
+        videoComposition.renderSize = sourceVideoTrack.naturalSize;
+        if (size.width > size.height) {
+            
+            [layerInstruction setTransform:transform atTime:CMTimeMakeWithSeconds(time, 30)];
+        } else {
+            float s = size.width/size.height;
+            CGAffineTransform new = CGAffineTransformConcat(transform, CGAffineTransformMakeScale(s,s));
+            float x = (size.height - size.width*s)/2;
+            
+            CGAffineTransform newer = CGAffineTransformConcat(new, CGAffineTransformMakeTranslation(x, 0));
+            [layerInstruction setTransform:newer atTime:CMTimeMakeWithSeconds(time, 30)];
+        }
+        
+        ok = [compositionVideoTrack insertTimeRange:sourceVideoTrack.timeRange ofTrack:sourceVideoTrack atTime:[composition duration] error:&error];
+        
+        
+        if (!ok) {
+            // Deal with the error.
+            NSLog(@"something went wrong");
+        }
+        
+        
+        NSLog(@"\n source asset duration is %f \n source vid track timerange is %f %f \n composition duration is %f \n composition vid track time range is %f %f",CMTimeGetSeconds([sourceAsset duration]), CMTimeGetSeconds(sourceVideoTrack.timeRange.start),CMTimeGetSeconds(sourceVideoTrack.timeRange.duration),CMTimeGetSeconds([composition duration]), CMTimeGetSeconds(compositionVideoTrack.timeRange.start),CMTimeGetSeconds(compositionVideoTrack.timeRange.duration));
+        
+        time += CMTimeGetSeconds(sourceVideoTrack.timeRange.duration);
+        
+    }
+    
+    instruction.layerInstructions = [NSArray arrayWithObject:layerInstruction];
+    instruction.timeRange = compositionVideoTrack.timeRange;
+    
+    videoComposition.instructions = [NSArray arrayWithObject:instruction];
+    
+    NSString *guid = [[NSUUID new] UUIDString];
+    NSString *outputFile = [NSString stringWithFormat:@"video_%@_final.mp4", guid];
+    
+    if ([_delegate respondsToSelector:@selector(vision:willStartVideoCaptureToFile:)]) {
+        outputFile = [_delegate vision:self willStartVideoCaptureToFile:outputFile];
+        
+        if (!outputFile) {
+            [self _failVideoCaptureWithErrorCode:PBJVisionErrorBadOutputFile];
+            return;
+        }
+    }
+    
+    NSString *outputDirectory = (_captureDirectory == nil ? NSTemporaryDirectory() : _captureDirectory);
+    NSString *outputPath = [outputDirectory stringByAppendingPathComponent:outputFile];
+    NSURL *outputURL = [NSURL fileURLWithPath:outputPath];
+    if ([[NSFileManager defaultManager] fileExistsAtPath:outputPath]) {
+        NSError *error = nil;
+        if (![[NSFileManager defaultManager] removeItemAtPath:outputPath error:&error]) {
+            [self _failVideoCaptureWithErrorCode:PBJVisionErrorOutputFileExists];
+            
+            DLog(@"could not setup an output file (file exists)");
+            return;
+        }
+    }
+    
+    if (!outputPath || [outputPath length] == 0) {
+        [self _failVideoCaptureWithErrorCode:PBJVisionErrorBadOutputFile];
+        
+        DLog(@"could not setup an output file");
+        return;
+    }
+    
+    AVAssetExportSession *exportSession = [AVAssetExportSession exportSessionWithAsset:composition presetName:AVAssetExportPresetPassthrough];
+    exportSession.shouldOptimizeForNetworkUse = YES;
+    exportSession.outputFileType = AVFileTypeMPEG4;
+    exportSession.outputURL = outputURL;
+    [exportSession exportAsynchronouslyWithCompletionHandler:^{
+        NSLog(@"done processing video!");
+        completionHandler([outputURL absoluteString]);
+    }];
+}
+
 - (void)endVideoCapture
 {    
     DLog(@"ending video capture");
     
     [self _enqueueBlockOnCaptureVideoQueue:^{
-        if (!_flags.recording)
-            return;
-        
         if (!_mediaWriter) {
             DLog(@"media writer unavailable to end");
             return;
@@ -1942,25 +2058,28 @@ typedef void (^PBJVisionBlock)();
                     [_delegate visionDidEndVideoCapture:self];
 
                 NSMutableDictionary *videoDict = [[NSMutableDictionary alloc] init];
-                NSString *path = [_mediaWriter.outputURL path];
-                if (path) {
-                    videoDict[PBJVisionVideoPathKey] = path;
-                    
-                    if (_flags.thumbnailEnabled) {
-                        if (_flags.defaultVideoThumbnails) {
-                            [self captureVideoThumbnailAtTime:capturedDuration];
-                        }
+                [self generateFullVideoWithCompletionHandler:^(NSString * newpath) {
+                    NSString *path = newpath;
+                    if (path) {
+                        videoDict[PBJVisionVideoPathKey] = path;
                         
-                        [self _generateThumbnailsForVideoWithURL:_mediaWriter.outputURL inDictionary:videoDict];
+                        if (_flags.thumbnailEnabled) {
+                            if (_flags.defaultVideoThumbnails) {
+                                [self captureVideoThumbnailAtTime:capturedDuration];
+                            }
+                            
+                            [self _generateThumbnailsForVideoWithURL:_mediaWriter.outputURL inDictionary:videoDict];
+                        }
                     }
-                }
-
-                videoDict[PBJVisionVideoCapturedDurationKey] = @(capturedDuration);
-
-                NSError *error = [_mediaWriter error];
-                if ([_delegate respondsToSelector:@selector(vision:capturedVideo:error:)]) {
-                    [_delegate vision:self capturedVideo:videoDict error:error];
-                }
+                    
+                    videoDict[PBJVisionVideoCapturedDurationKey] = @(capturedDuration);
+                    
+                    NSError *error = [_mediaWriter error];
+                    if ([_delegate respondsToSelector:@selector(vision:capturedVideo:error:)]) {
+                        [_delegate vision:self capturedVideo:videoDict error:error];
+                    }
+                }];
+                
             }];
         };
         [_mediaWriter finishWritingWithCompletionHandler:finishWritingCompletionHandler];
@@ -1993,6 +2112,30 @@ typedef void (^PBJVisionBlock)();
 
         [_mediaWriter finishWritingWithCompletionHandler:finishWritingCompletionHandler];
     }];
+}
+
+- (CGFloat)lastVideoFragmentDuration
+{
+    if (_mediaWriter) {
+        return CMTimeGetSeconds(_mediaWriter.videoDuration);
+    }
+    
+    return 0.0;
+}
+
+- (void)removeLastVideoFragment
+{
+    _mediaWriter.delegate = nil;
+    [_mediaWriter finishWritingWithCompletionHandler:^{
+        
+    }];
+    
+    [_mediaWriters removeObject:_mediaWriter];
+    _mediaWriter = nil;
+    if (_mediaWriters.count > 0) {
+        _mediaWriters.lastObject.delegate = self;
+        _mediaWriter = _mediaWriters.lastObject;
+    }
 }
 
 - (void)captureVideoFrameAsPhoto
@@ -2078,14 +2221,6 @@ typedef void (^PBJVisionBlock)();
     }
 }
 
-- (void)_failPhotoCaptureWithErrorCode:(NSInteger)errorCode
-{
-    if (errorCode && [_delegate respondsToSelector:@selector(vision:capturedPhoto:error:)]) {
-        NSError *error = [NSError errorWithDomain:PBJVisionErrorDomain code:errorCode userInfo:nil];
-        [_delegate vision:self capturedPhoto:nil error:error];
-    }
-}
-
 #pragma mark - media writer setup
 
 - (BOOL)_setupMediaWriterAudioInputWithSampleBuffer:(CMSampleBufferRef)sampleBuffer
@@ -2164,9 +2299,8 @@ typedef void (^PBJVisionBlock)();
                                      AVVideoWidthKey : @(videoDimensions.width),
                                      AVVideoHeightKey : @(videoDimensions.height),
                                      AVVideoCompressionPropertiesKey : compressionSettings };
-
-
-    return [_mediaWriter setupVideoWithSettings:videoSettings withAdditional:[self additionalVideoProperties]];
+    
+    return [_mediaWriter setupVideoWithSettings:videoSettings];
 }
 
 - (void)_automaticallyEndCaptureIfMaximumDurationReachedWithSampleBuffer:(CMSampleBufferRef)sampleBuffer
@@ -2183,7 +2317,8 @@ typedef void (^PBJVisionBlock)();
         }
         CMTime currentCaptureDuration = CMTimeSubtract(currentTimestamp, _startTimestamp);
         if (CMTIME_IS_VALID(currentCaptureDuration)) {
-            if (CMTIME_COMPARE_INLINE(currentCaptureDuration, >=, _maximumCaptureDuration)) {
+            if (self.capturedVideoSeconds >= CMTimeGetSeconds(_maximumCaptureDuration)) {
+//            if (CMTIME_COMPARE_INLINE(currentCaptureDuration, >=, _maximumCaptureDuration)) {
                 [self _enqueueBlockOnMainQueue:^{
                     [self endVideoCapture];
                 }];
@@ -2750,7 +2885,7 @@ typedef void (^PBJVisionBlock)();
 
     [EAGLContext setCurrentContext:_context];
     
-    NSBundle *bundle = [NSBundle bundleForClass:[PBJVision class]];
+    NSBundle *bundle = [NSBundle mainBundle];
     
     NSString *vertShaderName = [bundle pathForResource:@"Shader" ofType:@"vsh"];
     NSString *fragShaderName = [bundle pathForResource:@"Shader" ofType:@"fsh"];
