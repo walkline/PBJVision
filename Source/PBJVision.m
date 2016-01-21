@@ -1925,6 +1925,7 @@ typedef void (^PBJVisionBlock)();
 {
     AVMutableComposition *composition = [AVMutableComposition composition];
     AVMutableCompositionTrack *compositionVideoTrack = [composition addMutableTrackWithMediaType:AVMediaTypeVideo preferredTrackID:kCMPersistentTrackID_Invalid];
+    AVMutableCompositionTrack *soundtrackTrack = [composition addMutableTrackWithMediaType:AVMediaTypeAudio preferredTrackID:kCMPersistentTrackID_Invalid];
     AVMutableVideoComposition *videoComposition = [AVMutableVideoComposition videoComposition];
     
     videoComposition.frameDuration = CMTimeMake(1,30);
@@ -1944,10 +1945,14 @@ typedef void (^PBJVisionBlock)();
     for (int i = 0; i < _mediaWriters.count; i++) {
         AVURLAsset *sourceAsset = [AVURLAsset URLAssetWithURL:[array objectAtIndex:i] options:[NSDictionary dictionaryWithObject:[NSNumber numberWithBool:YES] forKey:AVURLAssetPreferPreciseDurationAndTimingKey]];
         
-        NSError *error = nil;
+        NSArray * tracks = [sourceAsset tracksWithMediaType:AVMediaTypeVideo];
         
-        BOOL ok = NO;
-        AVAssetTrack *sourceVideoTrack = [[sourceAsset tracksWithMediaType:AVMediaTypeVideo] objectAtIndex:0];
+        if (tracks.count == 0) {
+            continue;
+        }
+        
+        NSError *error = nil;
+        AVAssetTrack *sourceVideoTrack = [tracks objectAtIndex:0];
         
         CGSize temp = CGSizeApplyAffineTransform(sourceVideoTrack.naturalSize, sourceVideoTrack.preferredTransform);
         CGSize size = CGSizeMake(fabsf(temp.width), fabsf(temp.height));
@@ -1965,20 +1970,35 @@ typedef void (^PBJVisionBlock)();
             CGAffineTransform newer = CGAffineTransformConcat(new, CGAffineTransformMakeTranslation(x, 0));
             [layerInstruction setTransform:newer atTime:CMTimeMakeWithSeconds(time, 30)];
         }
+
+        if ([compositionVideoTrack insertTimeRange:sourceVideoTrack.timeRange ofTrack:sourceVideoTrack atTime:[composition duration] error:&error]) {
+            // Deal with the error.
+            NSLog(@"something went wrong");
+        }
+
+        time += CMTimeGetSeconds(sourceVideoTrack.timeRange.duration);
+    }
+    
+    time = 0;
+    
+    for (int i = 0; i < _mediaWriters.count; i++) {
+        AVURLAsset *sourceAsset = [AVURLAsset URLAssetWithURL:[array objectAtIndex:i] options:[NSDictionary dictionaryWithObject:[NSNumber numberWithBool:YES] forKey:AVURLAssetPreferPreciseDurationAndTimingKey]];
         
-        ok = [compositionVideoTrack insertTimeRange:sourceVideoTrack.timeRange ofTrack:sourceVideoTrack atTime:[composition duration] error:&error];
+        NSArray * tracks = [sourceAsset tracksWithMediaType:AVMediaTypeAudio];
         
+        if (tracks.count == 0) {
+            continue;
+        }
         
-        if (!ok) {
+        NSError *error = nil;
+        AVAssetTrack *sourceAudioTrack = [tracks objectAtIndex:0];
+        
+        if ([soundtrackTrack insertTimeRange:sourceAudioTrack.timeRange ofTrack:sourceAudioTrack atTime:CMTimeMakeWithSeconds(time, 30) error:&error]) {
             // Deal with the error.
             NSLog(@"something went wrong");
         }
         
-        
-        NSLog(@"\n source asset duration is %f \n source vid track timerange is %f %f \n composition duration is %f \n composition vid track time range is %f %f",CMTimeGetSeconds([sourceAsset duration]), CMTimeGetSeconds(sourceVideoTrack.timeRange.start),CMTimeGetSeconds(sourceVideoTrack.timeRange.duration),CMTimeGetSeconds([composition duration]), CMTimeGetSeconds(compositionVideoTrack.timeRange.start),CMTimeGetSeconds(compositionVideoTrack.timeRange.duration));
-        
-        time += CMTimeGetSeconds(sourceVideoTrack.timeRange.duration);
-        
+        time += CMTimeGetSeconds(sourceAudioTrack.timeRange.duration);
     }
     
     instruction.layerInstructions = [NSArray arrayWithObject:layerInstruction];
