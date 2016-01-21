@@ -1908,12 +1908,7 @@ typedef void (^PBJVisionBlock)();
         if (!_flags.recording || !_flags.paused)
             return;
  
-        if (!_mediaWriter) {
-            DLog(@"media writer unavailable to resume");
-            return;
-        }
- 
-         [self createNewMediaWriter];
+        [self createNewMediaWriter];
         
         DLog(@"resuming video capture");
        
