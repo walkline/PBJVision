@@ -316,6 +316,9 @@ typedef NS_ENUM(GLint, PBJVisionUniformLocationTypes)
     if (self.autoUpdatePreviewOrientation) {
         [self setPreviewOrientation:cameraOrientation];
     }
+    
+    AVCaptureConnection *videoConnection = [_captureOutputVideo connectionWithMediaType:AVMediaTypeVideo];
+    [self _setOrientationForConnection:videoConnection];
 }
 
 - (void)setPreviewOrientation:(PBJCameraOrientation)previewOrientation {
@@ -1933,78 +1936,67 @@ typedef void (^PBJVisionBlock)();
     
     AVMutableVideoCompositionInstruction *instruction = [AVMutableVideoCompositionInstruction videoCompositionInstruction];
     AVMutableVideoCompositionLayerInstruction *layerInstruction = [AVMutableVideoCompositionLayerInstruction videoCompositionLayerInstructionWithAssetTrack:compositionVideoTrack];
+
+    CGSize videoSize = CGSizeZero;
+    CMTime cmTime = kCMTimeZero;
     
-    // Get only paths the user selected
-    NSMutableArray *array = [NSMutableArray array];
-    for (PBJMediaWriter * writer in _mediaWriters){
-        [array addObject:writer.outputURL];
-    }
-    
-    float time = 0;
-    
-    for (int i = 0; i < _mediaWriters.count; i++) {
-        AVURLAsset *sourceAsset = [AVURLAsset URLAssetWithURL:[array objectAtIndex:i] options:[NSDictionary dictionaryWithObject:[NSNumber numberWithBool:YES] forKey:AVURLAssetPreferPreciseDurationAndTimingKey]];
+    for (PBJMediaWriter * writer in _mediaWriters) {
+        AVURLAsset *sourceAsset = [AVURLAsset URLAssetWithURL:writer.outputURL options:[NSDictionary dictionaryWithObject:[NSNumber numberWithBool:YES] forKey:AVURLAssetPreferPreciseDurationAndTimingKey]];
         
+        NSError *error = nil;
         NSArray * tracks = [sourceAsset tracksWithMediaType:AVMediaTypeVideo];
         
         if (tracks.count == 0) {
             continue;
         }
         
-        NSError *error = nil;
         AVAssetTrack *sourceVideoTrack = [tracks objectAtIndex:0];
+        
+        tracks = [sourceAsset tracksWithMediaType:AVMediaTypeAudio];
+        
+        if (tracks.count == 0) {
+            continue;
+        }
+        
+        AVAssetTrack *sourceAudioTrack = [tracks objectAtIndex:0];
         
         CGSize temp = CGSizeApplyAffineTransform(sourceVideoTrack.naturalSize, sourceVideoTrack.preferredTransform);
         CGSize size = CGSizeMake(fabsf(temp.width), fabsf(temp.height));
         CGAffineTransform transform = sourceVideoTrack.preferredTransform;
         
+        if (videoSize.width < size.width)
+            videoSize = size;
+        
         videoComposition.renderSize = sourceVideoTrack.naturalSize;
         if (size.width > size.height) {
-            
-            [layerInstruction setTransform:transform atTime:CMTimeMakeWithSeconds(time, 30)];
+            [layerInstruction setTransform:transform atTime:cmTime];
         } else {
             float s = size.width/size.height;
             CGAffineTransform new = CGAffineTransformConcat(transform, CGAffineTransformMakeScale(s,s));
             float x = (size.height - size.width*s)/2;
             
             CGAffineTransform newer = CGAffineTransformConcat(new, CGAffineTransformMakeTranslation(x, 0));
-            [layerInstruction setTransform:newer atTime:CMTimeMakeWithSeconds(time, 30)];
+            [layerInstruction setTransform:newer atTime:cmTime];
         }
 
-        if ([compositionVideoTrack insertTimeRange:sourceVideoTrack.timeRange ofTrack:sourceVideoTrack atTime:[composition duration] error:&error]) {
-            // Deal with the error.
-            NSLog(@"something went wrong");
-        }
-
-        time += CMTimeGetSeconds(sourceVideoTrack.timeRange.duration);
-    }
-    
-    time = 0;
-    
-    for (int i = 0; i < _mediaWriters.count; i++) {
-        AVURLAsset *sourceAsset = [AVURLAsset URLAssetWithURL:[array objectAtIndex:i] options:[NSDictionary dictionaryWithObject:[NSNumber numberWithBool:YES] forKey:AVURLAssetPreferPreciseDurationAndTimingKey]];
-        
-        NSArray * tracks = [sourceAsset tracksWithMediaType:AVMediaTypeAudio];
-        
-        if (tracks.count == 0) {
-            continue;
-        }
-        
-        NSError *error = nil;
-        AVAssetTrack *sourceAudioTrack = [tracks objectAtIndex:0];
-        
-        if ([soundtrackTrack insertTimeRange:sourceAudioTrack.timeRange ofTrack:sourceAudioTrack atTime:CMTimeMakeWithSeconds(time, 30) error:&error]) {
+        if (![compositionVideoTrack insertTimeRange:sourceVideoTrack.timeRange ofTrack:sourceVideoTrack atTime:cmTime error:&error]) {
             // Deal with the error.
             NSLog(@"something went wrong");
         }
         
-        time += CMTimeGetSeconds(sourceAudioTrack.timeRange.duration);
+        if (![soundtrackTrack insertTimeRange:sourceVideoTrack.timeRange ofTrack:sourceAudioTrack atTime:cmTime error:&error]) {
+            // Deal with the error.
+            NSLog(@"something went wrong");
+        }
+
+        cmTime = CMTimeAdd(cmTime, sourceVideoTrack.timeRange.duration);
     }
     
     instruction.layerInstructions = [NSArray arrayWithObject:layerInstruction];
-    instruction.timeRange = compositionVideoTrack.timeRange;
+    instruction.timeRange = CMTimeRangeMake(kCMTimeZero, cmTime);
     
     videoComposition.instructions = [NSArray arrayWithObject:instruction];
+    videoComposition.renderSize = videoSize;
     
     NSString *guid = [[NSUUID new] UUIDString];
     NSString *outputFile = [NSString stringWithFormat:@"video_%@_final.mp4", guid];
@@ -2038,11 +2030,15 @@ typedef void (^PBJVisionBlock)();
         return;
     }
     
-    AVAssetExportSession *exportSession = [AVAssetExportSession exportSessionWithAsset:composition presetName:AVAssetExportPresetPassthrough];
+    AVAssetExportSession *exportSession = [AVAssetExportSession exportSessionWithAsset:composition presetName:AVAssetExportPresetHighestQuality];
     exportSession.shouldOptimizeForNetworkUse = YES;
     exportSession.outputFileType = AVFileTypeMPEG4;
     exportSession.outputURL = outputURL;
+    exportSession.videoComposition = videoComposition;
     [exportSession exportAsynchronouslyWithCompletionHandler:^{
+        if (exportSession.error) {
+            NSLog(@"Session exporter error %@", exportSession.error);
+        }
         NSLog(@"done processing video!");
         completionHandler([outputURL absoluteString]);
     }];
@@ -2151,6 +2147,16 @@ typedef void (^PBJVisionBlock)();
         _mediaWriters.lastObject.delegate = self;
         _mediaWriter = _mediaWriters.lastObject;
     }
+}
+
+- (NSArray<NSURL*>*)fragmentsUrls
+{
+    NSMutableArray<NSURL*>* urls = @[].mutableCopy;
+    for (PBJMediaWriter * writer in _mediaWriters) {
+        [urls addObject:writer.outputURL];
+    }
+    
+    return urls;
 }
 
 - (void)captureVideoFrameAsPhoto
@@ -2292,6 +2298,14 @@ typedef void (^PBJVisionBlock)();
             videoDimensions.height = (int32_t)(dimensions.width * 3 / 4.0f);
             break;
         }
+        case PBJOutputFormatCustom:
+        {
+            if (_customVideoSize.width > 0 && _customVideoSize.height > 0) {
+                videoDimensions.width = (int32_t)_customVideoSize.width;
+                videoDimensions.height = (int32_t)_customVideoSize.height;
+            }
+            break;
+        }
         case PBJOutputFormatPreset:
         default:
             break;
@@ -2333,7 +2347,6 @@ typedef void (^PBJVisionBlock)();
         CMTime currentCaptureDuration = CMTimeSubtract(currentTimestamp, _startTimestamp);
         if (CMTIME_IS_VALID(currentCaptureDuration)) {
             if (self.capturedVideoSeconds >= CMTimeGetSeconds(_maximumCaptureDuration)) {
-//            if (CMTIME_COMPARE_INLINE(currentCaptureDuration, >=, _maximumCaptureDuration)) {
                 [self _enqueueBlockOnMainQueue:^{
                     [self endVideoCapture];
                 }];
@@ -2354,6 +2367,12 @@ typedef void (^PBJVisionBlock)();
         return;
     }
 
+    if (_flags.paused) {
+        if (_mediaWriter.writingStatus != AVAssetWriterStatusCompleted) {
+            [_mediaWriter finishWritingWithCompletionHandler:^{}];
+        }
+    }
+    
     if (!_flags.recording || _flags.paused) {
         CFRelease(sampleBuffer);
         return;

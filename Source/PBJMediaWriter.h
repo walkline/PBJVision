@@ -41,6 +41,8 @@
 @property (nonatomic, readonly, getter=isAudioReady) BOOL audioReady;
 @property (nonatomic, readonly, getter=isVideoReady) BOOL videoReady;
 
+@property (nonatomic, readonly, getter=getWritingStatus) AVAssetWriterStatus writingStatus;
+
 - (BOOL)setupAudioWithSettings:(NSDictionary *)audioSettings;
 - (BOOL)setupVideoWithSettings:(NSDictionary *)videoSettings;
 

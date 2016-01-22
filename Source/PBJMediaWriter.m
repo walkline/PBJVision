@@ -47,6 +47,8 @@
     CMTime _audioTimestamp;
     CMTime _videoTimestamp;
     CMTime _videoDuration;
+    
+    BOOL finished;
 }
 
 @end
@@ -79,6 +81,11 @@
     BOOL isVideoSetup = (_assetWriterVideoInput != nil) || isVideoNotAuthorized;
     
     return isVideoSetup;
+}
+
+- (AVAssetWriterStatus)getWritingStatus
+{
+    return _assetWriter.status;
 }
 
 - (NSError *)error
@@ -130,6 +137,7 @@
             }
             
         }
+        finished = NO;
         
         DLog(@"prepared to write to (%@)", outputURL);
     }
@@ -249,7 +257,6 @@
 			DLog(@"error when starting to write (%@)", [_assetWriter error]);
             return;
 		}
-        
 	}
     
     // check for completion state
@@ -295,12 +302,17 @@
                 }
 			}
 		}
-
 	}
 }
 
 - (void)finishWritingWithCompletionHandler:(void (^)(void))handler
 {
+    if (finished) {
+        if (handler)
+            handler();
+        return;
+    }
+    
     if (_assetWriter.status == AVAssetWriterStatusUnknown ||
         _assetWriter.status == AVAssetWriterStatusCompleted) {
         DLog(@"asset writer was in an unexpected state (%@)", @(_assetWriter.status));
@@ -308,9 +320,11 @@
             handler();
         return;
     }
+    
     [_assetWriterVideoInput markAsFinished];
     [_assetWriterAudioInput markAsFinished];
     [_assetWriter finishWritingWithCompletionHandler:handler];
+    finished = YES;
 }
 
 
