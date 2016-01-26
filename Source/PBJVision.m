@@ -1937,6 +1937,31 @@ typedef void (^PBJVisionBlock)();
     AVMutableVideoCompositionInstruction *instruction = [AVMutableVideoCompositionInstruction videoCompositionInstruction];
     AVMutableVideoCompositionLayerInstruction *layerInstruction = [AVMutableVideoCompositionLayerInstruction videoCompositionLayerInstructionWithAssetTrack:compositionVideoTrack];
 
+    CGSize sizeItr = CGSizeZero;
+    BOOL isSizeSame = YES;
+    
+    for (PBJMediaWriter * writer in _mediaWriters) {
+        AVURLAsset *sourceAsset = [AVURLAsset URLAssetWithURL:writer.outputURL options:[NSDictionary dictionaryWithObject:[NSNumber numberWithBool:YES] forKey:AVURLAssetPreferPreciseDurationAndTimingKey]];
+
+        NSArray * tracks = [sourceAsset tracksWithMediaType:AVMediaTypeVideo];
+        
+        if (tracks.count == 0) {
+            continue;
+        }
+        
+        AVAssetTrack *sourceVideoTrack = [tracks objectAtIndex:0];
+        
+        CGSize temp = CGSizeApplyAffineTransform(sourceVideoTrack.naturalSize, sourceVideoTrack.preferredTransform);
+        CGSize size = CGSizeMake(fabsf(temp.width), fabsf(temp.height));
+        
+        if (sizeItr.width == 0)
+            sizeItr = size;
+        
+        if (sizeItr.width != size.width || sizeItr.height != size.height) {
+            isSizeSame = NO;
+        }
+    }
+    
     CGSize videoSize = CGSizeZero;
     CMTime cmTime = kCMTimeZero;
     
@@ -1967,16 +1992,19 @@ typedef void (^PBJVisionBlock)();
         if (videoSize.width < size.width)
             videoSize = size;
         
-        videoComposition.renderSize = sourceVideoTrack.naturalSize;
-        if (size.width > size.height) {
+        if (isSizeSame) {
             [layerInstruction setTransform:transform atTime:cmTime];
         } else {
-            float s = size.width/size.height;
-            CGAffineTransform new = CGAffineTransformConcat(transform, CGAffineTransformMakeScale(s,s));
-            float x = (size.height - size.width*s)/2;
-            
-            CGAffineTransform newer = CGAffineTransformConcat(new, CGAffineTransformMakeTranslation(x, 0));
-            [layerInstruction setTransform:newer atTime:cmTime];
+            if (size.width > size.height) {
+                [layerInstruction setTransform:transform atTime:cmTime];
+            } else {
+                float s = size.width/size.height;
+                CGAffineTransform new = CGAffineTransformConcat(transform, CGAffineTransformMakeScale(s,s));
+                float x = (size.height - size.width*s)/2;
+                
+                CGAffineTransform newer = CGAffineTransformConcat(new, CGAffineTransformMakeTranslation(x, 0));
+                [layerInstruction setTransform:newer atTime:cmTime];
+            }
         }
 
         if (![compositionVideoTrack insertTimeRange:sourceVideoTrack.timeRange ofTrack:sourceVideoTrack atTime:cmTime error:&error]) {
